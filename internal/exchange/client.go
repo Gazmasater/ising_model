@@ -2,9 +2,6 @@ package kucoin
 
 import (
 	"context"
-	"db_trace/kucoin-ising-bot/internal/config"
-	"db_trace/kucoin-ising-bot/internal/core"
-	"db_trace/kucoin-ising-bot/internal/types"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +12,10 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"db_trace/kucoin-ising-bot/internal/config"
+	"db_trace/kucoin-ising-bot/internal/core"
+	"db_trace/kucoin-ising-bot/internal/types"
 )
 
 type Client struct {
@@ -57,23 +58,26 @@ type wsEnvelope struct {
 	Data    json.RawMessage `json:"data"`
 }
 
-type tickerData struct {
-	Sequence    string `json:"sequence"`
-	Price       string `json:"price"`
-	Size        string `json:"size"`
-	BestAsk     string `json:"bestAsk"`
-	BestAskSize string `json:"bestAskSize"`
-	BestBid     string `json:"bestBid"`
-	BestBidSize string `json:"bestBidSize"`
+// Futures level5
+type depth5Data struct {
+	Bids     [][]any `json:"bids"`
+	Asks     [][]any `json:"asks"`
+	Sequence int64   `json:"sequence"`
+	Ts       int64   `json:"ts"`
 }
 
-type tradeData struct {
-	Price    string `json:"price"`
-	Sequence string `json:"sequence"`
-	Side     string `json:"side"`
-	Size     string `json:"size"`
-	Symbol   string `json:"symbol"`
-	Time     string `json:"time"`
+// Futures ticker v1
+type tickerV1Data struct {
+	Symbol       string `json:"symbol"`
+	Sequence     int64  `json:"sequence"`
+	Side         string `json:"side"`
+	Size         any    `json:"size"` // contracts
+	Price        string `json:"price"`
+	BestBidSize  any    `json:"bestBidSize"`
+	BestBidPrice string `json:"bestBidPrice"`
+	BestAskPrice string `json:"bestAskPrice"`
+	BestAskSize  any    `json:"bestAskSize"`
+	Ts           int64  `json:"ts"`
 }
 
 func (c *Client) Run(ctx context.Context) error {
@@ -85,7 +89,7 @@ func (c *Client) Run(ctx context.Context) error {
 		}
 
 		if err := c.runOnce(ctx); err != nil && !errors.Is(err, context.Canceled) {
-			fmt.Printf("kucoin reconnect after error: %v\n", err)
+			fmt.Printf("kucoin futures reconnect after error: %v\n", err)
 		}
 
 		select {
@@ -99,12 +103,12 @@ func (c *Client) Run(ctx context.Context) error {
 func (c *Client) runOnce(ctx context.Context) error {
 	wsURL, pingInterval, err := c.getWSURL(ctx)
 	if err != nil {
-		return fmt.Errorf("get ws url: %w", err)
+		return fmt.Errorf("get futures ws url: %w", err)
 	}
 
 	conn, _, err := websocket.DefaultDialer.DialContext(ctx, wsURL, nil)
 	if err != nil {
-		return fmt.Errorf("dial ws: %w", err)
+		return fmt.Errorf("dial futures ws: %w", err)
 	}
 	defer conn.Close()
 
@@ -207,8 +211,8 @@ func (c *Client) waitWelcome(ctx context.Context, conn *websocket.Conn) error {
 
 func (c *Client) subscribe(conn *websocket.Conn) error {
 	topics := []string{
-		"/market/ticker:" + c.symbol,
-		"/market/match:" + c.symbol,
+		"/contractMarket/level2Depth5:" + c.symbol,
+		"/contractMarket/ticker:" + c.symbol, // v1 => last match + side/size/price
 	}
 
 	for _, topic := range topics {
@@ -243,57 +247,89 @@ func (c *Client) handleMessage(payload []byte) error {
 	}
 
 	switch {
-	case strings.HasPrefix(env.Topic, "/market/ticker:"):
-		return c.handleTicker(env)
-	case strings.HasPrefix(env.Topic, "/market/match:"):
-		return c.handleTrade(env)
+	case strings.HasPrefix(env.Topic, "/contractMarket/level2Depth5:"):
+		return c.handleDepth5(env)
+	case strings.HasPrefix(env.Topic, "/contractMarket/ticker:"):
+		return c.handleTickerV1(env)
 	default:
 		return nil
 	}
 }
 
-func (c *Client) handleTicker(env wsEnvelope) error {
-	var d tickerData
+func (c *Client) handleDepth5(env wsEnvelope) error {
+	var d depth5Data
 	if err := json.Unmarshal(env.Data, &d); err != nil {
 		return nil
 	}
 
-	bestBid, err1 := strconv.ParseFloat(d.BestBid, 64)
-	bestAsk, err2 := strconv.ParseFloat(d.BestAsk, 64)
-	bidSize, err3 := strconv.ParseFloat(d.BestBidSize, 64)
-	askSize, err4 := strconv.ParseFloat(d.BestAskSize, 64)
-	if err1 != nil || err2 != nil || err3 != nil || err4 != nil {
-		return nil
+	bids := make([]types.Level, 0, len(d.Bids))
+	for _, row := range d.Bids {
+		if len(row) < 2 {
+			continue
+		}
+		price, ok1 := toFloat(row[0])
+		sizeContracts, ok2 := toFloat(row[1])
+		if !ok1 || !ok2 || price <= 0 || sizeContracts <= 0 {
+			continue
+		}
+
+		// Переводим контракты в базовый актив, чтобы текущая математика paper-модели
+		// оставалась совместимой с (exit-entry)*size.
+		sizeBase := sizeContracts * c.cfg.ContractMultiplier
+		bids = append(bids, types.Level{
+			Price: price,
+			Qty:   sizeBase,
+		})
 	}
 
-	if bestBid <= 0 || bestAsk <= 0 || bestBid >= bestAsk || bidSize <= 0 || askSize <= 0 {
+	asks := make([]types.Level, 0, len(d.Asks))
+	for _, row := range d.Asks {
+		if len(row) < 2 {
+			continue
+		}
+		price, ok1 := toFloat(row[0])
+		sizeContracts, ok2 := toFloat(row[1])
+		if !ok1 || !ok2 || price <= 0 || sizeContracts <= 0 {
+			continue
+		}
+
+		sizeBase := sizeContracts * c.cfg.ContractMultiplier
+		asks = append(asks, types.Level{
+			Price: price,
+			Qty:   sizeBase,
+		})
+	}
+
+	if len(bids) == 0 || len(asks) == 0 {
+		return nil
+	}
+	if bids[0].Price >= asks[0].Price {
 		return nil
 	}
 
 	book := types.BookSnapshot{
-		Symbol: c.symbol,
-		Bids: []types.Level{
-			{Price: bestBid, Qty: bidSize},
-		},
-		Asks: []types.Level{
-			{Price: bestAsk, Qty: askSize},
-		},
-		Timestamp: time.Now(),
+		Symbol:    c.symbol,
+		Bids:      bids,
+		Asks:      asks,
+		Timestamp: parseFuturesTS(d.Ts),
 	}
-
 	c.emitBook(book)
 	return nil
 }
 
-func (c *Client) handleTrade(env wsEnvelope) error {
-	var d tradeData
+func (c *Client) handleTickerV1(env wsEnvelope) error {
+	var d tickerV1Data
 	if err := json.Unmarshal(env.Data, &d); err != nil {
 		return nil
 	}
 
-	price, err1 := strconv.ParseFloat(d.Price, 64)
-	qty, err2 := strconv.ParseFloat(d.Size, 64)
-	if err1 != nil || err2 != nil || price <= 0 || qty <= 0 {
+	price, err := strconv.ParseFloat(d.Price, 64)
+	if err != nil || price <= 0 {
+		return nil
+	}
+
+	sizeContracts, ok := anyToFloat(d.Size)
+	if !ok || sizeContracts <= 0 {
 		return nil
 	}
 
@@ -305,14 +341,12 @@ func (c *Client) handleTrade(env wsEnvelope) error {
 		side = types.SideSell
 	}
 
-	ts := parseKuCoinTime(d.Time)
-
 	tr := types.TradeTick{
 		Symbol:    c.symbol,
 		Price:     price,
-		Qty:       qty,
+		Qty:       sizeContracts * c.cfg.ContractMultiplier,
 		Side:      side,
-		Timestamp: ts,
+		Timestamp: parseFuturesTS(d.Ts),
 	}
 
 	c.emitTrade(tr)
@@ -334,7 +368,12 @@ func (c *Client) emitTrade(tr types.TradeTick) {
 }
 
 func (c *Client) getWSURL(ctx context.Context) (string, int64, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.kucoin.com/api/v1/bullet-public", nil)
+	req, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodPost,
+		"https://api-futures.kucoin.com/api/v1/bullet-public",
+		nil,
+	)
 	if err != nil {
 		return "", 0, err
 	}
@@ -370,24 +409,38 @@ func (c *Client) getWSURL(ctx context.Context) (string, int64, error) {
 	return u.String(), srv.PingInterval, nil
 }
 
-func parseKuCoinTime(raw string) time.Time {
-	if raw == "" {
-		return time.Now()
-	}
-
-	n, err := strconv.ParseInt(raw, 10, 64)
-	if err != nil {
-		return time.Now()
-	}
-
+func parseFuturesTS(ts int64) time.Time {
 	switch {
-	case n > 1e15:
-		return time.Unix(0, n) // nanoseconds
-	case n > 1e12:
-		return time.UnixMilli(n) // milliseconds
-	case n > 1e9:
-		return time.Unix(n, 0) // seconds
+	case ts > 1e15:
+		return time.Unix(0, ts)
+	case ts > 1e12:
+		return time.UnixMilli(ts)
+	case ts > 1e9:
+		return time.Unix(ts, 0)
 	default:
 		return time.Now()
 	}
+}
+
+func toFloat(v any) (float64, bool) {
+	switch x := v.(type) {
+	case float64:
+		return x, true
+	case string:
+		f, err := strconv.ParseFloat(x, 64)
+		return f, err == nil
+	case json.Number:
+		f, err := x.Float64()
+		return f, err == nil
+	case int:
+		return float64(x), true
+	case int64:
+		return float64(x), true
+	default:
+		return 0, false
+	}
+}
+
+func anyToFloat(v any) (float64, bool) {
+	return toFloat(v)
 }

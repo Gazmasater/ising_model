@@ -16,26 +16,30 @@ func Score(f types.FeatureState, r types.RegimeState) types.Signal {
 		return s
 	}
 
+	// Микроструктура — главный источник edge.
 	microLong :=
-		0.18*f.QDAsk -
-			0.10*f.QRAsk +
-			0.16*f.BookOFINorm +
-			0.18*f.TradeOFINorm +
+		0.16*f.QDAsk -
+			0.08*f.QRAsk +
+			0.18*f.BookOFINorm +
+			0.20*f.TradeOFINorm +
 			0.14*f.MicroDriftNorm +
-			0.08*f.ImbalanceTop5 +
-			0.06*f.ImbalanceTop3
+			0.12*f.ImbalanceTop5 +
+			0.08*f.ImbalanceTop3 +
+			0.08*f.NetOFINorm
 
 	microShort :=
-		0.18*f.QDBid -
-			0.10*f.QRBid +
-			0.16*(-f.BookOFINorm) +
-			0.18*(-f.TradeOFINorm) +
+		0.16*f.QDBid -
+			0.08*f.QRBid +
+			0.18*(-f.BookOFINorm) +
+			0.20*(-f.TradeOFINorm) +
 			0.14*(-f.MicroDriftNorm) +
-			0.08*(-f.ImbalanceTop5) +
-			0.06*(-f.ImbalanceTop3)
+			0.12*(-f.ImbalanceTop5) +
+			0.08*(-f.ImbalanceTop3) +
+			0.08*(-f.NetOFINorm)
 
-	isingLong := 0.42*f.IsingProbUp + 0.18*f.IsingConsensus - 0.14*f.IsingCriticalness
-	isingShort := 0.42*f.IsingProbDown + 0.18*f.IsingConsensus - 0.14*f.IsingCriticalness
+	// Ising — только подтверждение, а не доминирующий сигнал.
+	isingLong := 0.24*f.IsingProbUp + 0.08*f.IsingConsensus - 0.10*f.IsingCriticalness
+	isingShort := 0.24*f.IsingProbDown + 0.08*f.IsingConsensus - 0.10*f.IsingCriticalness
 
 	longScore := microLong + isingLong
 	shortScore := microShort + isingShort
@@ -44,24 +48,24 @@ func Score(f types.FeatureState, r types.RegimeState) types.Signal {
 	s.ShortScore = shortScore
 
 	long :=
-		f.IsingProbUp > 0.64 &&
-			f.IsingMagnet > 0.12 &&
-			f.IsingField > 0 &&
-			f.NetOFINorm > 0.12 &&
+		f.IsingProbUp > 0.80 &&
+			f.IsingMagnet > 0.20 &&
+			f.IsingField > 0.05 &&
+			f.NetOFINorm > 0.20 &&
 			f.Micro > f.Mid &&
-			f.MicroDriftNorm > 0 &&
-			f.ImbalanceTop5 > 0.05 &&
-			longScore > 0.40
+			f.MicroDriftNorm > 0.05 &&
+			f.ImbalanceTop5 > 0.10 &&
+			longScore > 0.65
 
 	short :=
-		f.IsingProbDown > 0.64 &&
-			f.IsingMagnet < -0.12 &&
-			f.IsingField < 0 &&
-			f.NetOFINorm < -0.12 &&
+		f.IsingProbDown > 0.80 &&
+			f.IsingMagnet < -0.20 &&
+			f.IsingField < -0.05 &&
+			f.NetOFINorm < -0.20 &&
 			f.Micro < f.Mid &&
-			f.MicroDriftNorm < 0 &&
-			f.ImbalanceTop5 < -0.05 &&
-			shortScore > 0.40
+			f.MicroDriftNorm < -0.05 &&
+			f.ImbalanceTop5 < -0.10 &&
+			shortScore > 0.65
 
 	if long {
 		s.Long = true
@@ -69,6 +73,7 @@ func Score(f types.FeatureState, r types.RegimeState) types.Signal {
 		s.Reason = "ising_long_signal"
 		return s
 	}
+
 	if short {
 		s.Short = true
 		s.NoTrade = false

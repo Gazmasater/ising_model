@@ -169,16 +169,35 @@ func (e *Engine) closePnL(f types.FeatureState) (side string, exitPx, grossPnL, 
 	case types.SideBuy:
 		side = "long"
 		exitPx = f.BestBid * (1.0 - e.cfg.SlippageFrac)
-		grossPnL = (exitPx - pos.Entry) * size
+
+		if e.cfg.FuturesMode {
+			grossPnL = (exitPx - pos.Entry) * size * e.cfg.ContractMultiplier
+		} else {
+			grossPnL = (exitPx - pos.Entry) * size
+		}
+
 	case types.SideSell:
 		side = "short"
 		exitPx = f.BestAsk * (1.0 + e.cfg.SlippageFrac)
-		grossPnL = (pos.Entry - exitPx) * size
+
+		if e.cfg.FuturesMode {
+			grossPnL = (pos.Entry - exitPx) * size * e.cfg.ContractMultiplier
+		} else {
+			grossPnL = (pos.Entry - exitPx) * size
+		}
+
 	default:
 		return "", 0, 0, 0
 	}
 
-	turnover := (pos.Entry + exitPx) * size
+	var turnover float64
+	if e.cfg.FuturesMode {
+		// notional per side = price * contracts * multiplier
+		turnover = (pos.Entry + exitPx) * size * e.cfg.ContractMultiplier
+	} else {
+		turnover = (pos.Entry + exitPx) * size
+	}
+
 	fees := turnover * e.cfg.TakerFeeRate
 	netPnL = grossPnL - fees
 
