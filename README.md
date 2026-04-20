@@ -5,6 +5,12 @@
       />
 
 
+<template>
+  <NuxtLayout>
+    <NuxtPage />
+  </NuxtLayout>
+</template>
+
 
 ✔ Vite client built in 36ms                                                                                                3:28:41 PM
 ✔ Vite server built in 63ms                                                                                                3:28:41 PM
