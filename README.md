@@ -255,3 +255,35 @@ p {
 
 
 app/public/img/header-boiler.png
+
+
+
+
+
+🔥 Правильный вариант (для тебя)
+1. Создай папку pages
+mkdir -p app/pages
+2. Создай файл
+app/pages/index.vue
+3. ВСТАВЬ КОД ТУДА (который я дал)
+4. ОБЯЗАТЕЛЬНО проверь app.vue
+
+Открой:
+
+app/app.vue
+
+И убедись, что там есть:
+
+<template>
+  <NuxtPage />
+</template>
+
+Если нет — замени всё на это.
+
+📦 Картинка
+
+Положи сюда:
+
+app/public/img/header-boiler.png
+🚀 Запуск
+npm run dev
